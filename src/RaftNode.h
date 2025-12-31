@@ -7,6 +7,7 @@
 #include <grpcpp/grpcpp.h>
 #include <random>
 #include <chrono>
+#include <sqlite3.h>
 #include "raft.grpc.pb.h"
 #include "raft.pb.h"
 
@@ -31,7 +32,6 @@ public:
                                const raft::AppendEntriesArgs* request, 
                                raft::AppendEntriesReply* reply) override;
 
-    // Fixed: Using correct Proto message names
     grpc::Status SubmitCommand(grpc::ServerContext* context, 
                                const raft::CommandRequest* request, 
                                raft::CommandReply* reply) override;
@@ -52,10 +52,16 @@ private:
     std::string node_address;
     std::vector<std::string> peer_addresses;
 
+    int votes_received;
+
     std::mutex mtx; 
     
     std::chrono::time_point<std::chrono::steady_clock> last_heartbeat; 
     std::mt19937 rng; 
+
+    sqlite3* db;
+    void executeSQL(const std::string& sql);
+    void applyCommittedEntries();
 
     void becomeFollower(int term);
     void startElection();

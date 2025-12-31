@@ -11,14 +11,56 @@ RaftNode::RaftNode(int id, std::string address, std::vector<std::string> peers)
       current_term(0), voted_for(-1), commit_index(0), last_applied(0),
       state(NodeState::FOLLOWER) {
     
-    for(size_t i = 0; i < peers.size(); ++i){
+    last_heartbeat = steady_clock::now();
+    
+    std::string db_path = "/var/lib/raft_data/raft_node_" + std::to_string(node_id) + ".db";
+    int rc = sqlite3_open(db_path.c_str(), &db);
+
+    if(rc){
+        std::cerr << "[Node " << node_id << "] Can't open database: " << sqlite3_errmsg(db) << std::endl;
+        db = nullptr;
+    } else {
+        std::cout << "[Node " << node_id << "] Opened database successfully." << std::endl;
+        executeSQL("CREATE TABLE IF NOT EXISTS users (name TEXT, value INTEGER);");
+    }
+
+    for(size_t i = 0; i < peer_addresses.size(); ++i){
         next_index.push_back(1);
         match_index.push_back(0);
     }
-    last_heartbeat = steady_clock::now();
 }
 
-RaftNode::~RaftNode() {}
+RaftNode::~RaftNode() {
+    if(db){
+        sqlite3_close(db);
+    }
+}
+
+void RaftNode::executeSQL(const std::string& sql){
+    char* errMsg = 0;
+    int rc = sqlite3_exec(db, sql.c_str(), 0, 0, &errMsg);
+    if(rc != SQLITE_OK){
+        std::string err(errMsg);
+        if(err.find("already exists") == std::string::npos){
+            std::cerr << "[Node " << node_id << "] SQL error: " << errMsg << std::endl;
+        }
+        sqlite3_free(errMsg);
+    } else {
+        std::cout << "[Node " << node_id << "] SQL executed successfully." << std::endl;
+    }
+}
+
+void RaftNode::applyCommittedEntries(){
+    std::lock_guard<std::mutex> lock(mtx);
+    while( commit_index > last_applied ){
+        last_applied++;
+        
+        if(last_applied - 1 < log.size()){
+            std::string command = log[last_applied - 1].command();
+            executeSQL(command);
+        }
+    }
+}
 
 void RaftNode::Run(){
     std::random_device rd;
@@ -27,6 +69,8 @@ void RaftNode::Run(){
 
     while(true){
         std::this_thread::sleep_for(milliseconds(10));
+
+        applyCommittedEntries();
         
         int timeout_ms = distribution(rng);
         std::unique_lock<std::mutex> lock(mtx);
@@ -64,7 +108,7 @@ void RaftNode::startElection(){
     state = NodeState::CANDIDATE;
     current_term++;
     voted_for = node_id;
-    int votes_received = 1;
+    votes_received = 1;
 
     std::cout << "[Node " << node_id << "] Starting election for term " << current_term << std::endl;
     last_heartbeat = steady_clock::now();
@@ -76,7 +120,7 @@ void RaftNode::startElection(){
         args.set_last_log_index(log.empty() ? 0 : log.size() - 1);
         args.set_last_log_term(log.empty() ? 0 : log.back().term());
 
-        std::thread([this, peer, args, &votes_received]() {
+        std::thread([this, peer, args]() {
             auto channel = grpc::CreateChannel(peer, grpc::InsecureChannelCredentials());
             auto stub = raft::RaftService::NewStub(channel);
 
@@ -86,7 +130,7 @@ void RaftNode::startElection(){
 
             if(status.ok()){
                 std::lock_guard<std::mutex> lock(mtx);
-                if(state != NodeState::CANDIDATE) return;
+                if(state != NodeState::CANDIDATE || current_term != args.term()) return;
 
                 if(reply.term() > current_term){
                     becomeFollower(reply.term());
@@ -160,10 +204,18 @@ void RaftNode::sendHeartbeats(){
         int prev_index = next_index[i] - 1;
         args.set_prev_log_index(prev_index);
 
-        if(prev_index >= 0 && prev_index < log.size())
+        if(prev_index > 0 && prev_index < log.size())
             args.set_prev_log_term(log[prev_index].term());
         else
             args.set_prev_log_term(0);
+        
+        if(log.size() >= next_index[i]){
+            for(int j = next_index[i] - 1; j < log.size(); ++j){
+                auto* entry = args.add_entries();
+                entry->set_term(log[j].term());
+                entry->set_command(log[j].command());
+            }
+        }
 
         std::string peer = peer_addresses[i]; 
 
@@ -187,9 +239,19 @@ void RaftNode::sendHeartbeats(){
             if(reply.success()){
                 match_index[i] = args.prev_log_index() + args.entries_size();
                 next_index[i] = match_index[i] + 1;
+
+                int majority = (peer_addresses.size() + 1) / 2 + 1;
+                int replicated_count = 1;
+
+                for(int m: match_index){
+                    if(m >= log.size()) replicated_count++;
+                }
+
+                if( replicated_count >= majority)
+                    commit_index = log.size();
             }
             else{
-                if(next_index[i] > 0) next_index[i]--;
+                if(next_index[i] > 1) next_index[i]--;
             }
         }).detach();
     }
@@ -218,8 +280,12 @@ grpc::Status RaftNode::AppendEntries(grpc::ServerContext* context,
         return grpc::Status::OK;
     }
 
+    for(const auto& entry : request->entries())
+        log.push_back(entry);
+    
+
     if(request->leader_commit() > commit_index)
-        commit_index = std::min((long long)request->leader_commit(), (long long)log.size() - 1);
+        commit_index = std::min((long long)request->leader_commit(), (long long)log.size());
     
     reply->set_success(true);
     reply->set_term(current_term);

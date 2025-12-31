@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     libgrpc++-dev \
     libprotobuf-dev \
     protobuf-compiler-grpc \
+    libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -24,6 +25,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     libgrpc++1.51 \
     libprotobuf32 \
+    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

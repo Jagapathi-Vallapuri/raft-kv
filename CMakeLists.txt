@@ -35,6 +35,7 @@ target_link_libraries( raft_server
     gRPC::grpc++
     protobuf::libprotobuf
     pthread
+    sqlite3
 )
 
 target_include_directories(raft_server PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
