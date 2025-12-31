@@ -1,0 +1,46 @@
+services:
+  node1:
+    build: .
+    hostname: node1
+    command: ./raft_server --id=1 --port=50051 --peers=node2:50051,node3:50051
+    ports:
+      - "50051:50051"
+    networks:
+      - raft_network
+    volumes:
+      - node1_data:/var/lib/raft_data
+
+  node2:
+    build: .
+    hostname: node2
+    command: ./raft_server --id=2 --port=50051 --peers=node1:50051,node3:50051
+    ports:
+      - "50052:50051"
+    networks:
+      - raft_network
+    volumes:
+      - node2_data:/var/lib/raft_data
+    depends_on:
+      - node1
+  
+  node3:
+    build: .
+    hostname: node3
+    command: ./raft_server --id=3 --port=50051 --peers=node1:50051,node2:50051
+    ports:
+      - "50053:50051"
+    networks:
+      - raft_network
+    volumes:
+      - node3_data:/var/lib/raft_data
+    depends_on:
+      - node1
+
+networks:
+  raft_network:
+    driver: bridge
+
+volumes:
+  node1_data:
+  node2_data:
+  node3_data:
